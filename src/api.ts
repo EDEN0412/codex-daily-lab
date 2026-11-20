@@ -21,11 +21,10 @@ function sendJson(
   response.end(JSON.stringify(body));
 }
 
-async function createTask(
+async function readTaskTitle(
   request: IncomingMessage,
   response: ServerResponse,
-  tasks: Task[],
-): Promise<void> {
+): Promise<string | undefined> {
   const mediaType = request.headers["content-type"]
     ?.split(";", 1)[0]
     ?.trim()
@@ -62,13 +61,41 @@ async function createTask(
     return;
   }
 
-  const task = { id: tasks.length + 1, title };
-  tasks.push(task);
-  sendJson(response, 201, task);
+  return title;
 }
 
 export function createApi() {
-  const tasks: Task[] = [];
+  const tasks = new Map<number, Task>();
+  let nextTaskId = 1;
+
+  async function saveTask(
+    request: IncomingMessage,
+    response: ServerResponse,
+    id?: number,
+  ): Promise<void> {
+    try {
+      const title = await readTaskTitle(request, response);
+      if (title === undefined) {
+        return;
+      }
+
+      if (id === undefined) {
+        const task = { id: nextTaskId++, title };
+        tasks.set(task.id, task);
+        sendJson(response, 201, task, { Location: `/tasks/${task.id}` });
+      } else if (tasks.has(id)) {
+        const task = { id, title };
+        tasks.set(id, task);
+        sendJson(response, 200, task);
+      } else {
+        sendJson(response, 404, { error: "Not found" });
+      }
+    } catch {
+      if (!response.destroyed && !response.headersSent) {
+        sendJson(response, 500, { error: "Internal server error" });
+      }
+    }
+  }
 
   return createServer((request, response) => {
     const path = request.url?.split("?", 1)[0];
@@ -83,17 +110,42 @@ export function createApi() {
 
     if (path === "/tasks") {
       if (request.method === "GET") {
-        sendJson(response, 200, { tasks });
+        sendJson(response, 200, { tasks: [...tasks.values()] });
       } else if (request.method === "POST") {
-        void createTask(request, response, tasks).catch(() => {
-          if (!response.destroyed) {
-            sendJson(response, 500, { error: "Internal server error" });
-          }
-        });
+        void saveTask(request, response);
       } else {
         sendJson(response, 405, { error: "Method not allowed" }, { Allow: "GET, POST" });
       }
       return;
+    }
+
+    const taskPath = path?.match(/^\/tasks\/([1-9][0-9]*)$/);
+    if (taskPath) {
+      const id = Number(taskPath[1]);
+      const task = tasks.get(id);
+      switch (request.method) {
+        case "GET":
+          if (task) {
+            sendJson(response, 200, task);
+            return;
+          }
+          break;
+        case "PATCH":
+          if (task) {
+            void saveTask(request, response, id);
+            return;
+          }
+          break;
+        case "DELETE":
+          if (tasks.delete(id)) {
+            response.writeHead(204).end();
+            return;
+          }
+          break;
+        default:
+          sendJson(response, 405, { error: "Method not allowed" }, { Allow: "GET, PATCH, DELETE" });
+          return;
+      }
     }
 
     sendJson(response, 404, { error: "Not found" });
