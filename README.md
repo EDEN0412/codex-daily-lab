@@ -21,8 +21,11 @@ API は `http://127.0.0.1:3000` で待ち受けます。ポートを変更する
 | GET | `/health` | `200` と `{"status":"ok"}` |
 | GET | `/tasks` | `200` とタスクの一覧（初期状態は `{"tasks":[]}`） |
 | POST | `/tasks` | `201` と登録したタスクの `id`、`title` |
+| GET | `/tasks/:id` | `200` と指定したタスク |
+| PATCH | `/tasks/:id` | `200` とタイトルを更新したタスク |
+| DELETE | `/tasks/:id` | `204`（本文なし） |
 
-`POST /tasks` は `Content-Type: application/json` を指定し、`title` に前後の空白を除いて 1〜120 文字の文字列を渡します。本文の上限は 4 KiB です。
+`POST /tasks` と `PATCH /tasks/:id` は `Content-Type: application/json` を指定し、`title` に前後の空白を除いて 1〜120 文字の文字列を渡します。本文の上限は 4 KiB です。登録時は `Location` ヘッダーで個別取得用のパスを返します。個別取得・更新・削除でタスクが存在しない場合は `404` です。サーバー稼働中、削除したタスクの ID は再利用しません。
 
 ```sh
 curl http://127.0.0.1:3000/health
@@ -30,6 +33,11 @@ curl -X POST http://127.0.0.1:3000/tasks \
   -H 'Content-Type: application/json' \
   -d '{"title":"CI の実行を確認する"}'
 curl http://127.0.0.1:3000/tasks
+curl http://127.0.0.1:3000/tasks/1
+curl -X PATCH http://127.0.0.1:3000/tasks/1 \
+  -H 'Content-Type: application/json' \
+  -d '{"title":"CI の結果をレビューする"}'
+curl -i -X DELETE http://127.0.0.1:3000/tasks/1
 ```
 
 ## 変更を検証
