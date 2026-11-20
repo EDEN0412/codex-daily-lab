@@ -89,6 +89,66 @@ test("POST /tasks rejects requests over the body size limit", async () => {
   assert.deepEqual(await response.json(), { error: "Request body exceeds 4096 bytes" });
 });
 
+test("task search matches titles across case and Unicode composition", async () => {
+  const title = "Review Cafe\u0301 notes";
+  await (await postTask(JSON.stringify({ title }))).json();
+  await (await postTask('{"title":"Write tests"}')).json();
+
+  const response = await fetch(`${baseUrl}/tasks/search?q=%20CAF%C3%89%20`);
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { tasks: [{ id: 1, title }], nextAfter: null });
+});
+
+test("task search paginates matching tasks by ID without overlap", async () => {
+  const titles = ["Review API", "Write docs", "Review CI", "Review tests"];
+  for (const title of titles) {
+    await (await postTask(JSON.stringify({ title }))).json();
+  }
+  const searchUrl = `${baseUrl}/tasks/search?q=review&limit=2`;
+  const first = await fetch(searchUrl);
+  assert.equal(first.status, 200);
+  const page = await first.json();
+  assert.deepEqual(page, { tasks: [{ id: 1, title: titles[0] }, { id: 3, title: titles[2] }], nextAfter: 3 });
+
+  const second = await fetch(`${searchUrl}&after=${page.nextAfter}`);
+  assert.equal(second.status, 200);
+  assert.deepEqual(await second.json(), { tasks: [{ id: 4, title: titles[3] }], nextAfter: null });
+});
+
+test("task search defaults to 20 tasks and handles an empty page", async () => {
+  for (let i = 1; i <= 21; i++) {
+    await (await postTask(JSON.stringify({ title: `Task ${i}` }))).json();
+  }
+  const response = await fetch(`${baseUrl}/tasks/search`);
+  const page = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(page.tasks.length, 20);
+  assert.equal(page.nextAfter, 20);
+
+  const empty = await fetch(`${baseUrl}/tasks/search?after=21`);
+  assert.equal(empty.status, 200);
+  assert.deepEqual(await empty.json(), { tasks: [], nextAfter: null });
+});
+
+test("task search rejects invalid and repeated query parameters", async () => {
+  const invalid = [
+    "q=%20", `q=${"a".repeat(121)}`, "limit=", "limit=0", "limit=101", "limit=1e1",
+    "after=-1", "after=1.5", "after=9007199254740992", "after=0&after=1", "q=a&q=b",
+  ];
+  for (const query of invalid) {
+    const response = await fetch(`${baseUrl}/tasks/search?${query}`);
+    assert.equal(response.status, 400, query);
+    assert.equal(typeof (await response.json()).error, "string");
+  }
+});
+
+test("task search rejects writes and advertises GET", async () => {
+  const response = await fetch(`${baseUrl}/tasks/search`, { method: "POST" });
+  assert.equal(response.status, 405);
+  assert.equal(response.headers.get("allow"), "GET");
+  assert.deepEqual(await response.json(), { error: "Method not allowed" });
+});
+
 test("unknown routes return 404", async () => {
   const response = await fetch(`${baseUrl}/missing`);
   assert.equal(response.status, 404);
