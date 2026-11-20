@@ -1,0 +1,40 @@
+name: Codex auto-merge
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: ['codex/auto/**']
+
+permissions: {}
+
+# Serialize automatic merges and recheck each PR against the current main.
+concurrency:
+  group: codex-auto-merge-main
+
+jobs:
+  squash:
+    if: >-
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_repository.id == github.event.repository.id
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: write
+      pull-requests: read
+    steps:
+      # workflow_run uses the default branch SHA. Never check out the PR head.
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+      - name: Verify eligibility and squash merge
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node .github/scripts/codex-auto-merge.mjs
