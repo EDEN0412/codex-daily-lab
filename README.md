@@ -32,6 +32,16 @@ curl -X POST http://127.0.0.1:3000/tasks \
 curl http://127.0.0.1:3000/tasks
 ```
 
+## タスクをファイルに出力
+
+`GET /tasks/export` は、リクエスト時点のタスクを ID 昇順で `tasks.ndjson` として出力します。
+1 行につき 1 件の JSON で、各行の末尾は改行です。タスクがない場合は空ファイルを返します。
+`HEAD /tasks/export` ではダウンロード用のヘッダーを確認できます。
+
+```sh
+curl -f -o tasks.ndjson http://127.0.0.1:3000/tasks/export
+```
+
 ## 変更を検証
 
 ```sh
