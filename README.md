@@ -40,3 +40,27 @@ npm test
 ```
 
 `npm test` は TypeScript を型検査・ビルドした後、Node.js 標準のテストランナーで HTTP 統合テストを実行します。GitHub Actions はブランチへの push と `main` 宛てのプルリクエストで、`npm ci`、Lint、テストを実行します。変更は作業ブランチに push し、`main` 宛てのプルリクエストを作成してレビューします。
+
+## Codex の毎日開発 PR
+
+毎日午前3時（日本時間）の Codex 実行は、同じリポジトリの
+`codex/auto/<変更名>` ブランチから `main` 宛ての PR を作成します。
+自動マージを許可する場合だけ、PR 作成時に本文へ
+`Codex-Auto-Merge: <40桁の実際のheadコミットSHA>` を独立した行で記載します。
+Codex の接続はリポジトリ所有者名義で PR を作成するため、専用ブランチ名と
+SHA の明示を組み合わせて、通常の手動 PR と区別します。手動 PR にはこの指定を使いません。
+更新された PR を再度自動マージ対象にする場合は、新しい SHA を明示して CI を通します。
+
+既存の `CI` を変更せず、PR の CI が完了してから `Codex auto-merge` を起動します。
+当該 PR の現在のコミットと `main` の SHA、`verify` の Lint・テスト（型チェックを含む）、
+マージ可否を確認して、標準の `GITHUB_TOKEN` で Squash Merge します。
+結果は PR のタイムラインおよび Actions の実行サマリーで確認できます。
+`.github/` 配下を変更する PR、下書き PR、フォークからの PR は手動レビューの対象です。
+CI の失敗、競合、設定・権限による拒否がある場合、PR は自動マージされません。
+
+ワークフローは `main` へ導入した後に発生する CI 完了イベントから動作します。
+リポジトリでは Squash Merge を許可し、Actions がジョブに指定した `contents: write` を
+使用できる必要があります。GitHub の「Allow auto-merge」は不要です。
+`main` に保護ルールを設定する場合、GitHub Actions の `verify` を必須チェックに指定し、
+マージ前のブランチ最新化を必須にすると、マージ時にも GitHub 側で競合や古いベースを検査できます。
+必須承認やマージキューなどのルールは GitHub が適用します。
