@@ -1,3 +1,4 @@
+import { pipeline, Readable } from "node:stream";
 import { createServer } from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
 
@@ -7,6 +8,35 @@ interface Task {
 }
 
 const maxBodyBytes = 4096;
+
+function* taskExportLines(tasks: readonly Task[]): Generator<string> {
+  for (const task of tasks) {
+    yield JSON.stringify(task) + "\n";
+  }
+}
+
+function exportTasks(request: IncomingMessage, response: ServerResponse, tasks: Iterable<Task>): void {
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    sendJson(response, 405, { error: "Method not allowed" }, { Allow: "GET, HEAD" });
+    return;
+  }
+
+  response.writeHead(200, {
+    "Content-Type": "application/x-ndjson; charset=utf-8",
+    "Content-Disposition": 'attachment; filename="tasks.ndjson"',
+    "Cache-Control": "no-store",
+  });
+  if (request.method === "HEAD") {
+    response.end();
+    return;
+  }
+
+  // Snapshot the list before streaming so later requests cannot change this export.
+  const lines = Readable.from(taskExportLines([...tasks]), { objectMode: false });
+  pipeline(lines, response, () => {
+    // Pipeline closes the streams on errors, including client disconnects.
+  });
+}
 
 function sendJson(
   response: ServerResponse,
@@ -78,6 +108,11 @@ export function createApi() {
       } else {
         sendJson(response, 405, { error: "Method not allowed" }, { Allow: "GET" });
       }
+      return;
+    }
+
+    if (path === "/tasks/export") {
+      exportTasks(request, response, tasks.values());
       return;
     }
 
