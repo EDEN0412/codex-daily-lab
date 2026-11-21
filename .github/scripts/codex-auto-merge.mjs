@@ -28,11 +28,12 @@ function canMerge(pr) {
 }
 
 export async function autoMerge({ run, repository, mainSha, request }) {
+  const workflowPath = run.path?.split("@", 1)[0];
   if (
     run.event !== "pull_request" ||
     run.status !== "completed" ||
     run.conclusion !== "success" ||
-    run.path !== ".github/workflows/ci.yml" ||
+    workflowPath !== ".github/workflows/ci.yml" ||
     run.repository?.id !== repository.id ||
     run.head_repository?.id !== repository.id ||
     !branchPattern.test(run.head_branch) ||

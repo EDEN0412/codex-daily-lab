@@ -67,18 +67,24 @@ function fixture() {
     autoMerge({ run, repository, mainSha, request }) };
 }
 
-test("squash merges only the exact head that passed every CI step", async () => {
-  const f = fixture();
-  assert.deepEqual(await f.execute(), { outcome: "Merged", number: 3, sha: f.mergedSha });
-  assert.deepEqual(f.writes, [
-    { path: "pulls/3/merge", method: "PUT", body: { sha: f.run.head_sha, merge_method: "squash" } },
-  ]);
-});
+for (const suffix of ["", "@main", "@refs/heads/codex/auto/example"]) {
+  const path = `.github/workflows/ci.yml${suffix}`;
+  test(`squash merges only the exact head that passed CI at ${path}`, async () => {
+    const f = fixture();
+    f.run.path = path;
+    assert.deepEqual(await f.execute(), { outcome: "Merged", number: 3, sha: f.mergedSha });
+    assert.deepEqual(f.writes, [
+      { path: "pulls/3/merge", method: "PUT", body: { sha: f.run.head_sha, merge_method: "squash" } },
+    ]);
+  });
+}
 
 const excluded = {
   "failed CI": (f) => { f.run.conclusion = "failure"; },
   "push-only CI": (f) => { f.run.event = "push"; },
   "different workflow": (f) => { f.run.path = ".github/workflows/other.yml"; },
+  "different workflow with a ref": (f) => { f.run.path = ".github/workflows/other.yml@main"; },
+  "workflow with a similar filename": (f) => { f.run.path = ".github/workflows/ci.yml.bak@main"; },
   "manual branch": (f) => { f.run.head_branch = "codex/setup-auto-merge"; },
   "fork branch": (f) => { f.run.head_repository.id = 9; },
   "unassociated CI": (f) => { f.run.pull_requests = []; },
