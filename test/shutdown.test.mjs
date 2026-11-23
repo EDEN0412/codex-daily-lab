@@ -62,6 +62,36 @@ function openTaskRequest(url) {
   return { continued, result, finish: () => req.end(body) };
 }
 
+test("response request IDs correlate with structured logs without exposing request data",
+  { timeout: 5_000 }, async (t) => {
+    const server = await startServer(t);
+    const receivedIds = [];
+    for (const path of ["/health", "/missing?token=secret-in-query"]) {
+      const logLine = server.nextLine();
+      const response = await fetch(server.url + path, {
+        headers: { "X-Request-ID": "untrusted-client-id", Authorization: "Bearer secret-in-header" },
+      });
+      await response.json();
+
+      const requestId = response.headers.get("x-request-id");
+      assert.match(requestId, /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/);
+      receivedIds.push(requestId);
+      const line = await logLine;
+      const log = JSON.parse(line);
+      assert.equal(log.event, "http_request");
+      assert.equal(log.requestId, requestId);
+      assert.equal(log.method, "GET");
+      assert.equal(log.status, response.status);
+      assert.equal(log.outcome, "completed");
+      assert.ok(Number.isInteger(log.durationMs) && log.durationMs >= 0);
+      for (const privateValue of ["secret-in-query", "secret-in-header", "untrusted-client-id"]) {
+        assert.equal(line.includes(privateValue), false);
+      }
+    }
+    assert.notEqual(receivedIds[0], receivedIds[1]);
+  },
+);
+
 test("SIGINT closes an idle API server cleanly", { timeout: 5_000 }, async (t) => {
   const { child, exit, url } = await startServer(t);
   const health = await fetch(url + "/health");
@@ -95,8 +125,15 @@ test("SIGTERM closes a stuck request when the grace period expires", { timeout: 
   const disconnected = assert.rejects(task.result, { code: "ECONNRESET" });
   await task.continued;
 
+  const stopping = server.nextLine();
   assert.equal(server.child.kill("SIGTERM"), true);
+  assert.match(await stopping, /Received SIGTERM, shutting down/);
+  const abortLog = server.nextLine();
   await disconnected;
   assert.deepEqual(await server.exit, [1, null]);
+  const { event, status, outcome } = JSON.parse(await abortLog);
+  assert.deepEqual({ event, status, outcome }, {
+    event: "http_request", status: null, outcome: "aborted",
+  });
   assert.match(server.getErrors(), /Shutdown timed out/);
 });

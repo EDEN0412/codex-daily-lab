@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { pipeline, Readable } from "node:stream";
 import { createServer } from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -101,6 +102,7 @@ export function createApi() {
   const tasks: Task[] = [];
 
   return createServer((request, response) => {
+    response.setHeader("X-Request-ID", randomUUID());
     const path = request.url?.split("?", 1)[0];
     if (path === "/health") {
       if (request.method === "GET") {

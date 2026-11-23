@@ -1,4 +1,5 @@
 import type { AddressInfo } from "node:net";
+import { performance } from "node:perf_hooks";
 import { createApi } from "./api.js";
 
 const configuredPort = process.env.PORT ?? "3000";
@@ -37,6 +38,20 @@ function shutdown(signal: NodeJS.Signals): void {
     }
   });
 }
+
+server.prependListener("request", (request, response) => {
+  const started = performance.now();
+  response.once("close", () => {
+    console.log(JSON.stringify({
+      event: "http_request",
+      requestId: response.getHeader("X-Request-ID"),
+      method: request.method,
+      status: response.headersSent ? response.statusCode : null,
+      durationMs: Math.round(performance.now() - started),
+      outcome: response.writableFinished ? "completed" : "aborted",
+    }));
+  });
+});
 
 server.on("request", (_request, response) => {
   response.once("finish", () => {
