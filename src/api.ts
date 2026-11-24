@@ -1,3 +1,4 @@
+import { TaskIdempotency } from "./idempotency.js";
 import { randomUUID } from "node:crypto";
 import { pipeline, Readable } from "node:stream";
 import { createServer } from "node:http";
@@ -56,6 +57,7 @@ async function createTask(
   request: IncomingMessage,
   response: ServerResponse,
   tasks: Task[],
+  idempotency: TaskIdempotency<Task>,
 ): Promise<void> {
   const mediaType = request.headers["content-type"]
     ?.split(";", 1)[0]
@@ -63,6 +65,12 @@ async function createTask(
     .toLowerCase();
   if (mediaType !== "application/json") {
     sendJson(response, 415, { error: "Content-Type must be application/json" });
+    return;
+  }
+
+  const key = request.headers["idempotency-key"];
+  if (key !== undefined && (typeof key !== "string" || !/^[a-zA-Z0-9._:-]{1,128}$/.test(key))) {
+    sendJson(response, 400, { error: "Invalid Idempotency-Key" });
     return;
   }
 
@@ -93,13 +101,32 @@ async function createTask(
     return;
   }
 
-  const task = { id: tasks.length + 1, title };
-  tasks.push(task);
-  sendJson(response, 201, task);
+  const registerTask = () => {
+    const task = { id: tasks.length + 1, title };
+    tasks.push(task);
+    return task;
+  };
+
+  if (key === undefined) {
+    sendJson(response, 201, registerTask());
+    return;
+  }
+
+  const result = idempotency.create(key, title, registerTask);
+  if (result.status === "conflict") {
+    sendJson(response, 409, { error: "Idempotency-Key was already used for another title" });
+    return;
+  }
+  if (result.status === "full") {
+    sendJson(response, 503, { error: "Idempotency-Key capacity reached" });
+    return;
+  }
+  sendJson(response, 201, result.value, { "Idempotency-Replayed": String(result.status === "replayed") });
 }
 
 export function createApi() {
   const tasks: Task[] = [];
+  const idempotency = new TaskIdempotency<Task>();
 
   return createServer((request, response) => {
     response.setHeader("X-Request-ID", randomUUID());
@@ -122,7 +149,7 @@ export function createApi() {
       if (request.method === "GET") {
         sendJson(response, 200, { tasks });
       } else if (request.method === "POST") {
-        void createTask(request, response, tasks).catch(() => {
+        void createTask(request, response, tasks, idempotency).catch(() => {
           if (!response.destroyed) {
             sendJson(response, 500, { error: "Internal server error" });
           }
