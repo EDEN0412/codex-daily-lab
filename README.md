@@ -32,6 +32,23 @@ curl -X POST http://127.0.0.1:3000/tasks \
 curl http://127.0.0.1:3000/tasks
 ```
 
+## タスク登録の再試行
+
+`POST /tasks` に任意の `Idempotency-Key` ヘッダーを送ると、同じキーとタイトルで再試行した場合に
+最初の登録結果を再利用します。キーは1〜128文字の英数字・`.`・`_`・`:`・`-` を使用できます。
+成功時は `201`、再試行時には `Idempotency-Replayed: true` を返します。
+同じキーに異なるタイトルを指定すると `409` です。
+
+キーは登録から10分間、サーバーのメモリに保持します。有効なキーが1,000件に達すると新しいキーには
+`503` を返し、保持済みのキーによる再試行は可能です。
+
+```sh
+curl -X POST http://127.0.0.1:3000/tasks \
+  -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: task-registration-1' \
+  -d '{"title":"重複登録を防ぐ"}'
+```
+
 ## サーバーを停止
 
 サーバープロセスは `SIGINT`（Ctrl+C）または `SIGTERM` を受けると新規接続を止め、
