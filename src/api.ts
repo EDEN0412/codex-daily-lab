@@ -1,3 +1,6 @@
+import { TaskIdempotency } from "./idempotency.js";
+import { randomUUID } from "node:crypto";
+import { pipeline, Readable } from "node:stream";
 import { createServer } from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
 
@@ -7,6 +10,35 @@ interface Task {
 }
 
 const maxBodyBytes = 4096;
+
+function* taskExportLines(tasks: readonly Task[]): Generator<string> {
+  for (const task of tasks) {
+    yield JSON.stringify(task) + "\n";
+  }
+}
+
+function exportTasks(request: IncomingMessage, response: ServerResponse, tasks: Iterable<Task>): void {
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    sendJson(response, 405, { error: "Method not allowed" }, { Allow: "GET, HEAD" });
+    return;
+  }
+
+  response.writeHead(200, {
+    "Content-Type": "application/x-ndjson; charset=utf-8",
+    "Content-Disposition": 'attachment; filename="tasks.ndjson"',
+    "Cache-Control": "no-store",
+  });
+  if (request.method === "HEAD") {
+    response.end();
+    return;
+  }
+
+  // Snapshot the list before streaming so later requests cannot change this export.
+  const lines = Readable.from(taskExportLines([...tasks]), { objectMode: false });
+  pipeline(lines, response, () => {
+    // Pipeline closes the streams on errors, including client disconnects.
+  });
+}
 
 function sendJson(
   response: ServerResponse,
@@ -31,6 +63,12 @@ async function readTaskTitle(
     .toLowerCase();
   if (mediaType !== "application/json") {
     sendJson(response, 415, { error: "Content-Type must be application/json" });
+    return;
+  }
+
+  const key = request.headers["idempotency-key"];
+  if (request.method === "POST" && key !== undefined && (typeof key !== "string" || !/^[a-zA-Z0-9._:-]{1,128}$/.test(key))) {
+    sendJson(response, 400, { error: "Invalid Idempotency-Key" });
     return;
   }
 
@@ -66,6 +104,7 @@ async function readTaskTitle(
 
 export function createApi() {
   const tasks = new Map<number, Task>();
+  const idempotency = new TaskIdempotency<Task>();
   let nextTaskId = 1;
 
   async function saveTask(
@@ -80,9 +119,31 @@ export function createApi() {
       }
 
       if (id === undefined) {
-        const task = { id: nextTaskId++, title };
-        tasks.set(task.id, task);
-        sendJson(response, 201, task, { Location: `/tasks/${task.id}` });
+        const registerTask = () => {
+          const task = { id: nextTaskId++, title };
+          tasks.set(task.id, task);
+          return task;
+        };
+        const key = request.headers["idempotency-key"];
+        if (typeof key !== "string") {
+          const task = registerTask();
+          sendJson(response, 201, task, { Location: `/tasks/${task.id}` });
+          return;
+        }
+
+        const result = idempotency.create(key, title, registerTask);
+        if (result.status === "conflict") {
+          sendJson(response, 409, { error: "Idempotency-Key was already used for another title" });
+          return;
+        }
+        if (result.status === "full") {
+          sendJson(response, 503, { error: "Idempotency-Key capacity reached" });
+          return;
+        }
+        sendJson(response, 201, result.value, {
+          Location: `/tasks/${result.value.id}`,
+          "Idempotency-Replayed": String(result.status === "replayed"),
+        });
       } else if (tasks.has(id)) {
         const task = { id, title };
         tasks.set(id, task);
@@ -98,6 +159,7 @@ export function createApi() {
   }
 
   return createServer((request, response) => {
+    response.setHeader("X-Request-ID", randomUUID());
     const path = request.url?.split("?", 1)[0];
     if (path === "/health") {
       if (request.method === "GET") {
@@ -105,6 +167,11 @@ export function createApi() {
       } else {
         sendJson(response, 405, { error: "Method not allowed" }, { Allow: "GET" });
       }
+      return;
+    }
+
+    if (path === "/tasks/export") {
+      exportTasks(request, response, tasks.values());
       return;
     }
 

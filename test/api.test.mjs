@@ -32,6 +32,49 @@ test("GET /health returns the service status", async () => {
   assert.deepEqual(await response.json(), { status: "ok" });
 });
 
+test("GET /tasks/export streams one UTF-8 JSON record per line in task order", async () => {
+  const tasks = [
+    { id: 1, title: '仕様を確認 📋\n"レビュー"' },
+    { id: 2, title: "Ship the update" },
+  ];
+  for (const { title } of tasks) {
+    const created = await postTask(JSON.stringify({ title }));
+    assert.equal(created.status, 201);
+    await created.json();
+  }
+
+  const response = await fetch(baseUrl + "/tasks/export");
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("content-type"), "application/x-ndjson; charset=utf-8");
+  assert.equal(response.headers.get("content-disposition"), 'attachment; filename="tasks.ndjson"');
+  assert.equal(response.headers.get("cache-control"), "no-store");
+  const lines = (await response.text()).split("\n");
+  assert.equal(lines.pop(), "");
+  assert.deepEqual(lines.map((line) => JSON.parse(line)), tasks);
+});
+
+test("task export returns an empty file when there are no tasks", async () => {
+  const response = await fetch(baseUrl + "/tasks/export");
+  assert.equal(response.status, 200);
+  assert.equal(await response.text(), "");
+});
+
+test("HEAD /tasks/export returns the download headers without a body", async () => {
+  await (await postTask('{"title":"Run checks"}')).json();
+  const response = await fetch(baseUrl + "/tasks/export", { method: "HEAD" });
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("content-disposition"), 'attachment; filename="tasks.ndjson"');
+  assert.equal(response.headers.get("content-type"), "application/x-ndjson; charset=utf-8");
+  assert.equal(await response.text(), "");
+});
+
+test("task export rejects writes and advertises GET and HEAD", async () => {
+  const response = await fetch(baseUrl + "/tasks/export", { method: "POST" });
+  assert.equal(response.status, 405);
+  assert.equal(response.headers.get("allow"), "GET, HEAD");
+  assert.deepEqual(await response.json(), { error: "Method not allowed" });
+});
+
 test("GET /tasks starts with an empty list", async () => {
   const response = await fetch(`${baseUrl}/tasks`);
   assert.equal(response.status, 200);
