@@ -32,6 +32,23 @@ curl -X POST http://127.0.0.1:3000/tasks \
 curl http://127.0.0.1:3000/tasks
 ```
 
+## タスクを一括登録
+
+`POST /tasks/batch` に `Content-Type: application/json` を指定し、`{"tasks":[{"title":"…"}]}` を送ります。
+1回に1〜50件、リクエスト本文は32 KiBまでです。すべてのタイトルを検証してから登録し、
+成功時は `201` と、入力順にIDを割り当てた `{"tasks":[...]}` を返します。
+タイトルに不備がある場合は `400` と該当項目の0始まりの `index` を返し、登録は行いません。
+
+`Idempotency-Key` は一括登録専用の範囲で有効です。同じキーと同じ順序のタイトルで再試行すると、
+最初の結果を返します。キーの保持は10分間、上限は1,000件です。
+
+```sh
+curl -X POST http://127.0.0.1:3000/tasks/batch \
+  -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: batch-1' \
+  -d '{"tasks":[{"title":"差分を確認する"},{"title":"テスト結果を確認する"}]}'
+```
+
 ## タスク登録の再試行
 
 `POST /tasks` に任意の `Idempotency-Key` ヘッダーを送ると、同じキーとタイトルで再試行した場合に
