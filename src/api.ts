@@ -53,48 +53,74 @@ function sendJson(
   response.end(JSON.stringify(body));
 }
 
-async function readTaskTitle(
-  request: IncomingMessage,
-  response: ServerResponse,
-): Promise<string | undefined> {
+function acceptsJson(request: IncomingMessage, response: ServerResponse): boolean {
   const mediaType = request.headers["content-type"]
     ?.split(";", 1)[0]
     ?.trim()
     .toLowerCase();
   if (mediaType !== "application/json") {
     sendJson(response, 415, { error: "Content-Type must be application/json" });
-    return;
+    return false;
   }
 
-  const key = request.headers["idempotency-key"];
-  if (request.method === "POST" && key !== undefined && (typeof key !== "string" || !/^[a-zA-Z0-9._:-]{1,128}$/.test(key))) {
-    sendJson(response, 400, { error: "Invalid Idempotency-Key" });
-    return;
-  }
+  return true;
+}
 
+function isValidIdempotencyKey(key: string | string[]): key is string {
+  return typeof key === "string" && /^[a-zA-Z0-9._:-]{1,128}$/.test(key);
+}
+
+async function readJsonBody(
+  request: IncomingMessage,
+  response: ServerResponse,
+  maxBytes: number,
+): Promise<unknown> {
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of request.iterator({ destroyOnReturn: false }) as AsyncIterable<Buffer>) {
     size += chunk.length;
-    if (size > maxBodyBytes) {
-      sendJson(response, 413, { error: "Request body exceeds 4096 bytes" }, { Connection: "close" });
+    if (size > maxBytes) {
+      sendJson(response, 413, { error: `Request body exceeds ${maxBytes} bytes` }, { Connection: "close" });
       return;
     }
     chunks.push(chunk);
   }
 
-  let data: unknown;
   try {
-    data = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
   } catch {
     sendJson(response, 400, { error: "Invalid JSON" });
     return;
   }
+}
 
+function taskTitle(data: unknown): string | undefined {
   const rawTitle =
     typeof data === "object" && data !== null && "title" in data ? data.title : undefined;
   const title = typeof rawTitle === "string" ? rawTitle.trim() : "";
-  if (title.length === 0 || [...title].length > 120) {
+  return title.length > 0 && [...title].length <= 120 ? title : undefined;
+}
+
+async function readTaskTitle(
+  request: IncomingMessage,
+  response: ServerResponse,
+): Promise<string | undefined> {
+  if (!acceptsJson(request, response)) {
+    return;
+  }
+
+  const key = request.headers["idempotency-key"];
+  if (request.method === "POST" && key !== undefined && !isValidIdempotencyKey(key)) {
+    sendJson(response, 400, { error: "Invalid Idempotency-Key" });
+    return;
+  }
+
+  const data = await readJsonBody(request, response, maxBodyBytes);
+  if (data === undefined) {
+    return;
+  }
+  const title = taskTitle(data);
+  if (title === undefined) {
     sendJson(response, 400, { error: "title must contain 1 to 120 characters" });
     return;
   }
@@ -102,10 +128,72 @@ async function readTaskTitle(
   return title;
 }
 
+async function createTaskBatch(
+  request: IncomingMessage,
+  response: ServerResponse,
+  registerTasks: (titles: string[]) => Task[],
+  idempotency: TaskIdempotency<Task[]>,
+): Promise<void> {
+  if (!acceptsJson(request, response)) {
+    return;
+  }
+  const key = request.headers["idempotency-key"];
+  if (key !== undefined && !isValidIdempotencyKey(key)) {
+    sendJson(response, 400, { error: "Invalid Idempotency-Key" });
+    return;
+  }
+
+  const data = await readJsonBody(request, response, 32 * 1024);
+  if (data === undefined) {
+    return;
+  }
+  const items = typeof data === "object" && data !== null && "tasks" in data ? data.tasks : undefined;
+  if (!Array.isArray(items) || items.length < 1 || items.length > 50) {
+    sendJson(response, 400, { error: "tasks must contain 1 to 50 items" });
+    return;
+  }
+
+  const titles: string[] = [];
+  for (const [index, item] of items.entries()) {
+    const title = taskTitle(item);
+    if (title === undefined) {
+      sendJson(response, 400, { error: "title must contain 1 to 120 characters", index });
+      return;
+    }
+    titles.push(title);
+  }
+
+  if (key === undefined) {
+    sendJson(response, 201, { tasks: registerTasks(titles) });
+    return;
+  }
+  const result = idempotency.create(key, JSON.stringify(titles), () => registerTasks(titles));
+  if (result.status === "conflict") {
+    sendJson(response, 409, { error: "Idempotency-Key was already used for another batch" });
+    return;
+  }
+  if (result.status === "full") {
+    sendJson(response, 503, { error: "Idempotency-Key capacity reached" });
+    return;
+  }
+  sendJson(response, 201, { tasks: result.value }, { "Idempotency-Replayed": String(result.status === "replayed") });
+}
+
 export function createApi() {
   const tasks = new Map<number, Task>();
   const idempotency = new TaskIdempotency<Task>();
+  const batchIdempotency = new TaskIdempotency<Task[]>();
   let nextTaskId = 1;
+
+  function registerTask(title: string): Task {
+    const task = { id: nextTaskId++, title };
+    tasks.set(task.id, task);
+    return task;
+  }
+
+  function registerBatch(titles: string[]): Task[] {
+    return titles.map(registerTask);
+  }
 
   async function saveTask(
     request: IncomingMessage,
@@ -119,19 +207,14 @@ export function createApi() {
       }
 
       if (id === undefined) {
-        const registerTask = () => {
-          const task = { id: nextTaskId++, title };
-          tasks.set(task.id, task);
-          return task;
-        };
         const key = request.headers["idempotency-key"];
         if (typeof key !== "string") {
-          const task = registerTask();
+          const task = registerTask(title);
           sendJson(response, 201, task, { Location: `/tasks/${task.id}` });
           return;
         }
 
-        const result = idempotency.create(key, title, registerTask);
+        const result = idempotency.create(key, title, () => registerTask(title));
         if (result.status === "conflict") {
           sendJson(response, 409, { error: "Idempotency-Key was already used for another title" });
           return;
@@ -167,6 +250,19 @@ export function createApi() {
       } else {
         sendJson(response, 405, { error: "Method not allowed" }, { Allow: "GET" });
       }
+      return;
+    }
+
+    if (path === "/tasks/batch") {
+      if (request.method !== "POST") {
+        sendJson(response, 405, { error: "Method not allowed" }, { Allow: "POST" });
+        return;
+      }
+      void createTaskBatch(request, response, registerBatch, batchIdempotency).catch(() => {
+        if (!response.destroyed && !response.headersSent) {
+          sendJson(response, 500, { error: "Internal server error" });
+        }
+      });
       return;
     }
 
