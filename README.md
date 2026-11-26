@@ -84,6 +84,21 @@ curl -X POST http://127.0.0.1:3000/tasks \
 curl -f -o tasks.ndjson http://127.0.0.1:3000/tasks/export
 ```
 
+## NDJSONファイルを取り込む
+
+`POST /tasks/import` に `application/x-ndjson` のファイルを送ると、各行のタイトルを検証し、
+新しいIDを割り当てて一括登録します。エクスポートしたIDは引き継ぎません。
+1回に1〜50行、32 KiBまで受け付けます。UTF-8で、LF・CRLFと末尾改行の有無に対応します。
+空行や不正なJSON、タイトル不備がある場合は登録を中止し、該当行の0始まりの `index` を返します。
+50行を超えるファイルは分割してください。冪等性キーはインポート専用の範囲で、10分間・最大1,000件保持します。
+
+```sh
+curl -X POST http://127.0.0.1:3000/tasks/import \
+  -H 'Content-Type: application/x-ndjson' \
+  -H 'Idempotency-Key: import-1' \
+  --data-binary @tasks.ndjson
+```
+
 ## リクエストをログから追跡
 
 API が処理するリクエストにはサーバーが UUID を割り当て、応答の
