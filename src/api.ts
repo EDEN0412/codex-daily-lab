@@ -1,3 +1,4 @@
+import { TextDecoder } from "node:util";
 import { TaskIdempotency } from "./idempotency.js";
 import { randomUUID } from "node:crypto";
 import { pipeline, Readable } from "node:stream";
@@ -10,6 +11,8 @@ interface Task {
 }
 
 const maxBodyBytes = 4096;
+const maxBatchBodyBytes = 32 * 1024;
+const maxBatchItems = 50;
 
 function* taskExportLines(tasks: readonly Task[]): Generator<string> {
   for (const task of tasks) {
@@ -53,13 +56,17 @@ function sendJson(
   response.end(JSON.stringify(body));
 }
 
-function acceptsJson(request: IncomingMessage, response: ServerResponse): boolean {
+function acceptsJson(
+  request: IncomingMessage,
+  response: ServerResponse,
+  expected: "application/json" | "application/x-ndjson" = "application/json",
+): boolean {
   const mediaType = request.headers["content-type"]
     ?.split(";", 1)[0]
     ?.trim()
     .toLowerCase();
-  if (mediaType !== "application/json") {
-    sendJson(response, 415, { error: "Content-Type must be application/json" });
+  if (mediaType !== expected) {
+    sendJson(response, 415, { error: `Content-Type must be ${expected}` });
     return false;
   }
 
@@ -70,11 +77,11 @@ function isValidIdempotencyKey(key: string | string[]): key is string {
   return typeof key === "string" && /^[a-zA-Z0-9._:-]{1,128}$/.test(key);
 }
 
-async function readJsonBody(
+async function readBody(
   request: IncomingMessage,
   response: ServerResponse,
   maxBytes: number,
-): Promise<unknown> {
+): Promise<Buffer | undefined> {
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of request.iterator({ destroyOnReturn: false }) as AsyncIterable<Buffer>) {
@@ -86,12 +93,58 @@ async function readJsonBody(
     chunks.push(chunk);
   }
 
+  return Buffer.concat(chunks);
+}
+
+async function readJsonBody(
+  request: IncomingMessage,
+  response: ServerResponse,
+  maxBytes: number,
+): Promise<unknown> {
+  const body = await readBody(request, response, maxBytes);
+  if (body === undefined) {
+    return;
+  }
   try {
-    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    return JSON.parse(body.toString("utf8"));
   } catch {
     sendJson(response, 400, { error: "Invalid JSON" });
     return;
   }
+}
+
+async function readNdjsonBody(request: IncomingMessage, response: ServerResponse): Promise<unknown[] | undefined> {
+  const body = await readBody(request, response, maxBatchBodyBytes);
+  if (body === undefined) {
+    return;
+  }
+  let content: string;
+  try {
+    content = new TextDecoder("utf-8", { fatal: true }).decode(body);
+  } catch {
+    sendJson(response, 400, { error: "NDJSON must use valid UTF-8" });
+    return;
+  }
+
+  const lines = content.split(/\r?\n/);
+  if (lines.at(-1) === "") {
+    lines.pop();
+  }
+  if (lines.length < 1 || lines.length > maxBatchItems) {
+    sendJson(response, 400, { error: "tasks must contain 1 to 50 items" });
+    return;
+  }
+
+  const items: unknown[] = [];
+  for (const [index, line] of lines.entries()) {
+    try {
+      items.push(JSON.parse(line));
+    } catch {
+      sendJson(response, 400, { error: "Invalid NDJSON", index });
+      return;
+    }
+  }
+  return items;
 }
 
 function taskTitle(data: unknown): string | undefined {
@@ -155,8 +208,10 @@ async function createTaskBatch(
   response: ServerResponse,
   registerTasks: (titles: string[]) => Task[],
   idempotency: TaskIdempotency<Task[]>,
+  format: "json" | "ndjson",
 ): Promise<void> {
-  if (!acceptsJson(request, response)) {
+  const importing = format === "ndjson";
+  if (!acceptsJson(request, response, importing ? "application/x-ndjson" : "application/json")) {
     return;
   }
   const key = request.headers["idempotency-key"];
@@ -165,12 +220,15 @@ async function createTaskBatch(
     return;
   }
 
-  const data = await readJsonBody(request, response, 32 * 1024);
+  const data = importing
+    ? await readNdjsonBody(request, response)
+    : await readJsonBody(request, response, maxBatchBodyBytes);
   if (data === undefined) {
     return;
   }
-  const items = typeof data === "object" && data !== null && "tasks" in data ? data.tasks : undefined;
-  if (!Array.isArray(items) || items.length < 1 || items.length > 50) {
+  const items = importing ? data
+    : typeof data === "object" && data !== null && "tasks" in data ? data.tasks : undefined;
+  if (!Array.isArray(items) || items.length < 1 || items.length > maxBatchItems) {
     sendJson(response, 400, { error: "tasks must contain 1 to 50 items" });
     return;
   }
@@ -204,6 +262,7 @@ async function createTaskBatch(
 export function createApi() {
   const tasks: Task[] = [];
   const idempotency = new TaskIdempotency<Task>();
+  const importIdempotency = new TaskIdempotency<Task[]>();
   const batchIdempotency = new TaskIdempotency<Task[]>();
 
   function registerBatch(titles: string[]): Task[] {
@@ -225,12 +284,14 @@ export function createApi() {
       return;
     }
 
-    if (path === "/tasks/batch") {
+    if (path === "/tasks/batch" || path === "/tasks/import") {
       if (request.method !== "POST") {
         sendJson(response, 405, { error: "Method not allowed" }, { Allow: "POST" });
         return;
       }
-      void createTaskBatch(request, response, registerBatch, batchIdempotency).catch(() => {
+      const importing = path === "/tasks/import";
+      const store = importing ? importIdempotency : batchIdempotency;
+      void createTaskBatch(request, response, registerBatch, store, importing ? "ndjson" : "json").catch(() => {
         if (!response.destroyed && !response.headersSent) {
           sendJson(response, 500, { error: "Internal server error" });
         }
