@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { pipeline, Readable } from "node:stream";
 import { createServer } from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { URLSearchParams } from "node:url";
 
 import { openTaskDatabase, TaskStore } from "./task-store.js";
 import type { Task } from "./task-store.js";
@@ -253,6 +254,53 @@ async function createTaskBatch(
   sendJson(response, 201, { tasks: result.value }, { "Idempotency-Replayed": String(result.status === "replayed") });
 }
 
+function parseInteger(value: string | null, fallback: number): number {
+  if (value === null) {
+    return fallback;
+  }
+  return /^(0|[1-9][0-9]*)$/.test(value) ? Number(value) : NaN;
+}
+
+function searchTasks(query: string, response: ServerResponse, tasks: Iterable<Task>): void {
+  const params = new URLSearchParams(query);
+  if (["q", "limit", "after"].some((name) => params.getAll(name).length > 1)) {
+    sendJson(response, 400, { error: "q, limit, and after may each appear only once" });
+    return;
+  }
+
+  const rawQuery = params.get("q");
+  const term = rawQuery?.trim().normalize("NFC").toLowerCase();
+  if (term !== undefined && (term.length === 0 || [...term].length > 120)) {
+    sendJson(response, 400, { error: "q must contain 1 to 120 characters" });
+    return;
+  }
+
+  const limit = parseInteger(params.get("limit"), 20);
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+    sendJson(response, 400, { error: "limit must be an integer from 1 to 100" });
+    return;
+  }
+
+  const after = parseInteger(params.get("after"), 0);
+  if (!Number.isSafeInteger(after)) {
+    sendJson(response, 400, { error: "after must be a non-negative safe integer" });
+    return;
+  }
+
+  const matches: Task[] = [];
+  for (const task of tasks) {
+    if (task.id <= after || (term !== undefined && !task.title.normalize("NFC").toLowerCase().includes(term))) {
+      continue;
+    }
+    if (matches.length === limit) {
+      sendJson(response, 200, { tasks: matches, nextAfter: matches.at(-1)?.id });
+      return;
+    }
+    matches.push(task);
+  }
+  sendJson(response, 200, { tasks: matches, nextAfter: null });
+}
+
 export function createApi(databasePath = ":memory:") {
   const database = openTaskDatabase(databasePath);
   const tasks = new TaskStore(database);
@@ -267,6 +315,15 @@ export function createApi(databasePath = ":memory:") {
   function handleRequest(request: IncomingMessage, response: ServerResponse): void {
     response.setHeader("X-Request-ID", randomUUID());
     const path = request.url?.split("?", 1)[0];
+    if (path === "/tasks/search") {
+      if (request.method === "GET") {
+        searchTasks(request.url?.slice(path.length) ?? "", response, tasks.values());
+      } else {
+        sendJson(response, 405, { error: "Method not allowed" }, { Allow: "GET" });
+      }
+      return;
+    }
+
     if (path === "/health") {
       if (request.method === "GET") {
         sendJson(response, 200, { status: "ok" });
