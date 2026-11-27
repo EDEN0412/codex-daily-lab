@@ -13,7 +13,8 @@ if (!Number.isInteger(shutdownTimeoutMs) || shutdownTimeoutMs < 1 || shutdownTim
   throw new Error("SHUTDOWN_TIMEOUT_MS must be an integer between 1 and 60000");
 }
 
-const server = createApi();
+const databasePath = process.env.TASK_DB_PATH ?? ":memory:";
+const server = createApi(databasePath);
 let shuttingDown = false;
 
 function shutdown(signal: NodeJS.Signals): void {

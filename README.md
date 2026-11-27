@@ -2,7 +2,7 @@
 
 AI 駆動開発を検証するための TypeScript / Node.js プロジェクトです。初期実装、テスト、CI の設定、ドキュメントは OpenAI Codex（AI）を使用して開発しました。タスク管理 API を題材に、変更の実装から自動検証、GitHub での PR レビューまでを試せます。
 
-API は Node.js 標準の HTTP モジュールで動作します。有料 API、有料サービス、認証キー、データベースは不要です。タスクはメモリに保存され、サーバーを再起動すると消えます。
+API は Node.js 標準の HTTP・SQLite モジュールで動作します。有料 API、有料サービス、認証キー、外部データベースは不要です。既定ではメモリに保存し、`TASK_DB_PATH` を設定するとファイルに永続化できます。
 
 ## ローカルで実行
 
@@ -40,6 +40,19 @@ curl -X PATCH http://127.0.0.1:3000/tasks/1 \
 curl -i -X DELETE http://127.0.0.1:3000/tasks/1
 ```
 
+## SQLiteでデータを永続化
+
+既定ではメモリ内のSQLiteを使います。再起動後もタスクと冪等性キーを保持するには、次のように起動します。
+
+```sh
+mkdir -p data
+TASK_DB_PATH=data/tasks.sqlite npm start
+```
+
+ファイルとテーブルは初回起動時に作成されます。タスクの登録と冪等性キーの保存は同じトランザクションで行い、
+期限内の再試行は再起動後も新規登録を起こしません。タイムアウトや保存エラーでは書き込みがロールバックされます。
+`data/` はGitの管理対象外です。
+
 ## タスクを一括登録
 
 `POST /tasks/batch` に `Content-Type: application/json` を指定し、`{"tasks":[{"title":"…"}]}` を送ります。
@@ -64,7 +77,7 @@ curl -X POST http://127.0.0.1:3000/tasks/batch \
 成功時は `201`、再試行時には `Idempotency-Replayed: true` を返します。
 同じキーに異なるタイトルを指定すると `409` です。
 
-キーは登録から10分間、サーバーのメモリに保持します。有効なキーが1,000件に達すると新しいキーには
+キーは登録から10分間、タスクと同じSQLiteデータベースに保持します。有効なキーが1,000件に達すると新しいキーには
 `503` を返し、保持済みのキーによる再試行は可能です。
 
 ```sh
@@ -90,6 +103,21 @@ curl -X POST http://127.0.0.1:3000/tasks \
 
 ```sh
 curl -f -o tasks.ndjson http://127.0.0.1:3000/tasks/export
+```
+
+## NDJSONファイルを取り込む
+
+`POST /tasks/import` に `application/x-ndjson` のファイルを送ると、各行のタイトルを検証し、
+新しいIDを割り当てて一括登録します。エクスポートしたIDは引き継ぎません。
+1回に1〜50行、32 KiBまで受け付けます。UTF-8で、LF・CRLFと末尾改行の有無に対応します。
+空行や不正なJSON、タイトル不備がある場合は登録を中止し、該当行の0始まりの `index` を返します。
+50行を超えるファイルは分割してください。冪等性キーはインポート専用の範囲で、10分間・最大1,000件保持します。
+
+```sh
+curl -X POST http://127.0.0.1:3000/tasks/import \
+  -H 'Content-Type: application/x-ndjson' \
+  -H 'Idempotency-Key: import-1' \
+  --data-binary @tasks.ndjson
 ```
 
 ## リクエストをログから追跡
