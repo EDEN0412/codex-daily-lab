@@ -1,13 +1,7 @@
-import { performance } from "node:perf_hooks";
+import type { DatabaseSync } from "node:sqlite";
 
 const keyLifetimeMs = 10 * 60 * 1_000;
 const maxKeys = 1_000;
-
-interface Entry<T> {
-  title: string;
-  value: T;
-  expiresAt: number;
-}
 
 type Result<T> =
   | { status: "created" | "replayed"; value: T }
@@ -15,29 +9,48 @@ type Result<T> =
   | { status: "full" };
 
 export class TaskIdempotency<T> {
-  private readonly entries = new Map<string, Entry<T>>();
+  constructor(
+    private readonly database: DatabaseSync,
+    private readonly scope: string,
+  ) {}
 
-  create(key: string, title: string, createTask: () => T, now = performance.now()): Result<T> {
-    // Keep existing keys valid until their expiry, even when the cache is full.
-    for (const [storedKey, entry] of this.entries) {
-      if (entry.expiresAt <= now) {
-        this.entries.delete(storedKey);
+  create(key: string, title: string, createTask: () => T, now = Date.now()): Result<T> {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const result = this.createOrReplay(key, title, createTask, now);
+      this.database.exec("COMMIT");
+      return result;
+    } catch (error) {
+      if (this.database.isTransaction) {
+        this.database.exec("ROLLBACK");
       }
+      throw error;
     }
+  }
 
-    const existing = this.entries.get(key);
+  private createOrReplay(key: string, title: string, createTask: () => T, now: number): Result<T> {
+    this.database.prepare("DELETE FROM task_idempotency WHERE expires_at <= ?").run(now);
+    const fingerprint = JSON.stringify(title);
+    const existing = this.database.prepare(
+      "SELECT fingerprint, response_json FROM task_idempotency WHERE scope = ? AND key = ?",
+    ).get(this.scope, key);
     if (existing) {
-      return existing.title === title
-        ? { status: "replayed", value: existing.value }
+      return existing.fingerprint === fingerprint
+        ? { status: "replayed", value: JSON.parse(existing.response_json as string) as T }
         : { status: "conflict" };
     }
 
-    if (this.entries.size >= maxKeys) {
+    const count = this.database.prepare(
+      "SELECT COUNT(*) AS count FROM task_idempotency WHERE scope = ?",
+    ).get(this.scope);
+    if (Number(count?.count) >= maxKeys) {
       return { status: "full" };
     }
 
     const value = createTask();
-    this.entries.set(key, { title, value, expiresAt: now + keyLifetimeMs });
+    this.database.prepare(
+      "INSERT INTO task_idempotency (scope, key, fingerprint, response_json, expires_at) VALUES (?, ?, ?, ?, ?)",
+    ).run(this.scope, key, fingerprint, JSON.stringify(value), now + keyLifetimeMs);
     return { status: "created", value };
   }
 }

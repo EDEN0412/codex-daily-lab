@@ -5,10 +5,8 @@ import { pipeline, Readable } from "node:stream";
 import { createServer } from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
 
-interface Task {
-  id: number;
-  title: string;
-}
+import { openTaskDatabase, TaskStore } from "./task-store.js";
+import type { Task } from "./task-store.js";
 
 const maxBodyBytes = 4096;
 const maxBatchBodyBytes = 32 * 1024;
@@ -157,7 +155,7 @@ function taskTitle(data: unknown): string | undefined {
 async function createTask(
   request: IncomingMessage,
   response: ServerResponse,
-  tasks: Task[],
+  tasks: TaskStore,
   idempotency: TaskIdempotency<Task>,
 ): Promise<void> {
   if (!acceptsJson(request, response)) {
@@ -180,11 +178,7 @@ async function createTask(
     return;
   }
 
-  const registerTask = () => {
-    const task = { id: tasks.length + 1, title };
-    tasks.push(task);
-    return task;
-  };
+  const registerTask = () => tasks.create(title);
 
   if (key === undefined) {
     sendJson(response, 201, registerTask());
@@ -259,20 +253,18 @@ async function createTaskBatch(
   sendJson(response, 201, { tasks: result.value }, { "Idempotency-Replayed": String(result.status === "replayed") });
 }
 
-export function createApi() {
-  const tasks: Task[] = [];
-  const idempotency = new TaskIdempotency<Task>();
-  const importIdempotency = new TaskIdempotency<Task[]>();
-  const batchIdempotency = new TaskIdempotency<Task[]>();
+export function createApi(databasePath = ":memory:") {
+  const database = openTaskDatabase(databasePath);
+  const tasks = new TaskStore(database);
+  const idempotency = new TaskIdempotency<Task>(database, "single");
+  const importIdempotency = new TaskIdempotency<Task[]>(database, "import");
+  const batchIdempotency = new TaskIdempotency<Task[]>(database, "batch");
 
   function registerBatch(titles: string[]): Task[] {
-    const firstId = tasks.length + 1;
-    const created = titles.map((title, index) => ({ id: firstId + index, title }));
-    tasks.push(...created);
-    return created;
+    return tasks.createBatch(titles);
   }
 
-  return createServer((request, response) => {
+  function handleRequest(request: IncomingMessage, response: ServerResponse): void {
     response.setHeader("X-Request-ID", randomUUID());
     const path = request.url?.split("?", 1)[0];
     if (path === "/health") {
@@ -306,10 +298,10 @@ export function createApi() {
 
     if (path === "/tasks") {
       if (request.method === "GET") {
-        sendJson(response, 200, { tasks });
+        sendJson(response, 200, { tasks: tasks.values() });
       } else if (request.method === "POST") {
         void createTask(request, response, tasks, idempotency).catch(() => {
-          if (!response.destroyed) {
+          if (!response.destroyed && !response.headersSent) {
             sendJson(response, 500, { error: "Internal server error" });
           }
         });
@@ -320,5 +312,19 @@ export function createApi() {
     }
 
     sendJson(response, 404, { error: "Not found" });
+  }
+
+  const server = createServer((request, response) => {
+    try {
+      handleRequest(request, response);
+    } catch {
+      if (!response.destroyed && !response.headersSent) {
+        sendJson(response, 500, { error: "Internal server error" });
+      } else {
+        response.destroy();
+      }
+    }
   });
+  server.once("close", () => database.close());
+  return server;
 }

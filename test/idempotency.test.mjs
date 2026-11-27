@@ -3,6 +3,7 @@ import { once } from "node:events";
 import { test } from "node:test";
 import { createApi } from "../dist/api.js";
 import { TaskIdempotency } from "../dist/idempotency.js";
+import { openTaskDatabase } from "../dist/task-store.js";
 
 async function setup(t) {
   const server = createApi().listen(0, "127.0.0.1");
@@ -56,8 +57,10 @@ test("invalid keys and invalid titles do not reserve a key or create a task", as
   assert.deepEqual(await list(), { tasks: [{ id: 1, title: "Valid title" }] });
 });
 
-test("the bounded cache preserves live retries, expires old keys, and then admits new ones", () => {
-  const store = new TaskIdempotency();
+test("the bounded cache preserves live retries, expires old keys, and then admits new ones", (t) => {
+  const database = openTaskDatabase(":memory:");
+  t.after(() => database.close());
+  const store = new TaskIdempotency(database, "single");
   const createTask = () => ({ id: 1, title: "First" });
   const unexpectedCreation = () => assert.fail("must not create while key is live or cache is full");
   for (let i = 0; i < 1_000; i++) {
