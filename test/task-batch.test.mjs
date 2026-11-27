@@ -11,6 +11,7 @@ async function setup(t) {
   const batchUrl = tasksUrl + "/batch";
   return {
     batchUrl,
+    tasksUrl,
     post: (body, headers = {}) => fetch(batchUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...headers },
@@ -81,5 +82,18 @@ test("concurrent retries replay the same ordered batch and conflicting input ret
   const conflict = await post({ tasks: tasks.toReversed() }, headers);
   assert.equal(conflict.status, 409);
   await conflict.json();
+  assert.deepEqual(await list(), expected);
+});
+
+test("batch creation after a deletion does not reuse task IDs", async (t) => {
+  const { postSingle, post, list, tasksUrl } = await setup(t);
+  const created = await postSingle("Delete this");
+  assert.equal(created.status, 201);
+  const first = await created.json();
+  assert.equal((await fetch(tasksUrl + "/" + first.id, { method: "DELETE" })).status, 204);
+  const batch = await post({ tasks: [{ title: "First" }, { title: "Second" }] });
+  assert.equal(batch.status, 201);
+  const expected = { tasks: [{ id: 2, title: "First" }, { id: 3, title: "Second" }] };
+  assert.deepEqual(await batch.json(), expected);
   assert.deepEqual(await list(), expected);
 });

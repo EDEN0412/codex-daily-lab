@@ -72,3 +72,28 @@ test("the bounded cache preserves live retries, expires old keys, and then admit
   assert.equal(store.create("extra", "First", createTask, 600_000).status, "created");
   assert.equal(store.create("key-0", "First", createTask, 600_000).status, "created");
 });
+
+test("replaying a previously deleted task does not restore it or reuse its ID", async (t) => {
+  const server = createApi().listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => server[Symbol.asyncDispose]());
+  const url = `http://127.0.0.1:${server.address().port}/tasks`;
+  const options = {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Idempotency-Key": "deleted-task" },
+    body: JSON.stringify({ title: "Original" }),
+  };
+  const first = await fetch(url, options);
+  assert.equal(first.headers.get("location"), "/tasks/1");
+  assert.deepEqual(await first.json(), { id: 1, title: "Original" });
+  assert.equal((await fetch(url + "/1", { method: "DELETE" })).status, 204);
+
+  const retry = await fetch(url, options);
+  assert.equal(retry.headers.get("idempotency-replayed"), "true");
+  assert.equal(retry.headers.get("location"), "/tasks/1");
+  assert.deepEqual(await retry.json(), { id: 1, title: "Original" });
+  assert.deepEqual(await (await fetch(url)).json(), { tasks: [] });
+
+  const next = await fetch(url, { ...options, headers: { ...options.headers, "Idempotency-Key": "new-task" } });
+  assert.deepEqual(await next.json(), { id: 2, title: "Original" });
+});

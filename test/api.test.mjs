@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
 import { afterEach, beforeEach, test } from "node:test";
+import { URL } from "node:url";
 import { createApi } from "../dist/api.js";
 
 let server;
@@ -145,4 +146,68 @@ test("unsupported methods return 405 and describe the allowed methods", async ()
     assert.equal(response.headers.get("allow"), allowed);
     assert.deepEqual(await response.json(), { error: "Method not allowed" });
   }
+});
+
+test("GET /tasks/:id returns the task at the creation URL", async () => {
+  const created = await postTask('{"title":"Review changes"}');
+  const location = created.headers.get("location");
+  assert.equal(location, "/tasks/1");
+  const response = await fetch(new URL(location, baseUrl));
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), await created.json());
+});
+
+test("PATCH /tasks/:id updates the title while preserving the ID and list order", async () => {
+  await (await postTask('{"title":"Draft changes"}')).json();
+  await (await postTask('{"title":"Run tests"}')).json();
+  const url = new URL("/tasks/1", baseUrl);
+  const headers = { "Content-Type": "application/json" };
+  const invalid = await fetch(url, { method: "PATCH", headers, body: '{"title":" "}' });
+  assert.equal(invalid.status, 400);
+  assert.deepEqual(await invalid.json(), { error: "title must contain 1 to 120 characters" });
+  assert.deepEqual(await (await fetch(url)).json(), { id: 1, title: "Draft changes" });
+
+  const updated = await fetch(url, { method: "PATCH", headers, body: '{"title":"  Review changes  "}' });
+  assert.equal(updated.status, 200);
+  assert.deepEqual(await updated.json(), { id: 1, title: "Review changes" });
+  assert.deepEqual(await (await fetch(new URL("/tasks", baseUrl))).json(), {
+    tasks: [
+      { id: 1, title: "Review changes" },
+      { id: 2, title: "Run tests" },
+    ],
+  });
+});
+
+test("DELETE /tasks/:id removes the task without reusing its ID", async () => {
+  await (await postTask('{"title":"Draft changes"}')).json();
+  await (await postTask('{"title":"Review changes"}')).json();
+  const url = new URL("/tasks/1", baseUrl);
+  const deleted = await fetch(url, { method: "DELETE" });
+  assert.equal(deleted.status, 204);
+  assert.equal(await deleted.text(), "");
+  assert.deepEqual(await (await fetch(new URL("/tasks", baseUrl))).json(), {
+    tasks: [{ id: 2, title: "Review changes" }],
+  });
+  const response = await postTask('{"title":"Run tests"}');
+  assert.equal(response.status, 201);
+  assert.deepEqual(await response.json(), { id: 3, title: "Run tests" });
+
+  for (const method of ["GET", "PATCH", "DELETE"]) {
+    const missing = await fetch(url, { method });
+    assert.equal(missing.status, 404);
+    assert.deepEqual(await missing.json(), { error: "Not found" });
+  }
+});
+
+test("task routes distinguish invalid IDs from unsupported methods", async () => {
+  await (await postTask('{"title":"Review changes"}')).json();
+  for (const path of ["/tasks/0", "/tasks/01", "/tasks/1.5", "/tasks/1/extra"]) {
+    const response = await fetch(new URL(path, baseUrl));
+    assert.equal(response.status, 404);
+    await response.json();
+  }
+  const response = await fetch(new URL("/tasks/1", baseUrl), { method: "POST" });
+  assert.equal(response.status, 405);
+  assert.equal(response.headers.get("allow"), "GET, PATCH, DELETE");
+  assert.deepEqual(await response.json(), { error: "Method not allowed" });
 });

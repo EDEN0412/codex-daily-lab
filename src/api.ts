@@ -152,18 +152,16 @@ function taskTitle(data: unknown): string | undefined {
   return title.length > 0 && [...title].length <= 120 ? title : undefined;
 }
 
-async function createTask(
+async function readTaskTitle(
   request: IncomingMessage,
   response: ServerResponse,
-  tasks: TaskStore,
-  idempotency: TaskIdempotency<Task>,
-): Promise<void> {
+): Promise<string | undefined> {
   if (!acceptsJson(request, response)) {
     return;
   }
 
   const key = request.headers["idempotency-key"];
-  if (key !== undefined && !isValidIdempotencyKey(key)) {
+  if (request.method === "POST" && key !== undefined && !isValidIdempotencyKey(key)) {
     sendJson(response, 400, { error: "Invalid Idempotency-Key" });
     return;
   }
@@ -178,23 +176,7 @@ async function createTask(
     return;
   }
 
-  const registerTask = () => tasks.create(title);
-
-  if (key === undefined) {
-    sendJson(response, 201, registerTask());
-    return;
-  }
-
-  const result = idempotency.create(key, title, registerTask);
-  if (result.status === "conflict") {
-    sendJson(response, 409, { error: "Idempotency-Key was already used for another title" });
-    return;
-  }
-  if (result.status === "full") {
-    sendJson(response, 503, { error: "Idempotency-Key capacity reached" });
-    return;
-  }
-  sendJson(response, 201, result.value, { "Idempotency-Replayed": String(result.status === "replayed") });
+  return title;
 }
 
 async function createTaskBatch(
@@ -264,6 +246,53 @@ export function createApi(databasePath = ":memory:") {
     return tasks.createBatch(titles);
   }
 
+  async function saveTask(
+    request: IncomingMessage,
+    response: ServerResponse,
+    id?: number,
+  ): Promise<void> {
+    try {
+      const title = await readTaskTitle(request, response);
+      if (title === undefined) {
+        return;
+      }
+
+      if (id === undefined) {
+        const key = request.headers["idempotency-key"];
+        if (typeof key !== "string") {
+          const task = tasks.create(title);
+          sendJson(response, 201, task, { Location: `/tasks/${task.id}` });
+          return;
+        }
+
+        const result = idempotency.create(key, title, () => tasks.create(title));
+        if (result.status === "conflict") {
+          sendJson(response, 409, { error: "Idempotency-Key was already used for another title" });
+          return;
+        }
+        if (result.status === "full") {
+          sendJson(response, 503, { error: "Idempotency-Key capacity reached" });
+          return;
+        }
+        sendJson(response, 201, result.value, {
+          Location: `/tasks/${result.value.id}`,
+          "Idempotency-Replayed": String(result.status === "replayed"),
+        });
+      } else {
+        const updated = tasks.update(id, title);
+        if (updated) {
+          sendJson(response, 200, updated);
+        } else {
+          sendJson(response, 404, { error: "Not found" });
+        }
+      }
+    } catch {
+      if (!response.destroyed && !response.headersSent) {
+        sendJson(response, 500, { error: "Internal server error" });
+      }
+    }
+  }
+
   function handleRequest(request: IncomingMessage, response: ServerResponse): void {
     response.setHeader("X-Request-ID", randomUUID());
     const path = request.url?.split("?", 1)[0];
@@ -300,15 +329,40 @@ export function createApi(databasePath = ":memory:") {
       if (request.method === "GET") {
         sendJson(response, 200, { tasks: tasks.values() });
       } else if (request.method === "POST") {
-        void createTask(request, response, tasks, idempotency).catch(() => {
-          if (!response.destroyed && !response.headersSent) {
-            sendJson(response, 500, { error: "Internal server error" });
-          }
-        });
+        void saveTask(request, response);
       } else {
         sendJson(response, 405, { error: "Method not allowed" }, { Allow: "GET, POST" });
       }
       return;
+    }
+
+    const taskPath = path?.match(/^\/tasks\/([1-9][0-9]*)$/);
+    if (taskPath) {
+      const id = Number(taskPath[1]);
+      const task = tasks.get(id);
+      switch (request.method) {
+        case "GET":
+          if (task) {
+            sendJson(response, 200, task);
+            return;
+          }
+          break;
+        case "PATCH":
+          if (task) {
+            void saveTask(request, response, id);
+            return;
+          }
+          break;
+        case "DELETE":
+          if (tasks.delete(id)) {
+            response.writeHead(204).end();
+            return;
+          }
+          break;
+        default:
+          sendJson(response, 405, { error: "Method not allowed" }, { Allow: "GET, PATCH, DELETE" });
+          return;
+      }
     }
 
     sendJson(response, 404, { error: "Not found" });

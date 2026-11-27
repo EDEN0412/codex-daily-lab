@@ -47,6 +47,22 @@ export class TaskStore {
     return (rows as unknown as TaskRow[]).map(toTask);
   }
 
+  get(id: number): Task | undefined {
+    const row = this.database.prepare("SELECT id, title_json FROM tasks WHERE id = ?").get(id);
+    return row ? toTask(row as unknown as TaskRow) : undefined;
+  }
+
+  update(id: number, title: string): Task | undefined {
+    const row = this.database.prepare(
+      "UPDATE tasks SET title_json = ? WHERE id = ? RETURNING id, title_json",
+    ).get(JSON.stringify(title), id);
+    return row ? toTask(row as unknown as TaskRow) : undefined;
+  }
+
+  delete(id: number): boolean {
+    return Number(this.database.prepare("DELETE FROM tasks WHERE id = ?").run(id).changes) > 0;
+  }
+
   create(title: string): Task {
     return this.createBatch([title])[0];
   }

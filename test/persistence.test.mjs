@@ -24,6 +24,7 @@ async function setup(t) {
     await once(server, "listening");
     const url = `http://127.0.0.1:${server.address().port}/tasks`;
     return {
+      url,
       async close() {
         await server[Symbol.asyncDispose]();
         servers.delete(server);
@@ -112,4 +113,28 @@ test("failed idempotency persistence rolls back every task in a batch", async (t
   } finally {
     database.close();
   }
+});
+
+test("updates and deletions survive reopening the database without reusing IDs", async (t) => {
+  const { start } = await setup(t);
+  const api = await start();
+  assert.equal((await api.post("", { title: "Original" }, "first")).status, 201);
+  assert.equal((await api.post("", { title: "Remove" }, "second")).status, 201);
+  const update = await fetch(api.url + "/1", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: '{"title":"Updated"}',
+  });
+  assert.equal(update.status, 200);
+  assert.deepEqual(await update.json(), { id: 1, title: "Updated" });
+  assert.equal((await fetch(api.url + "/2", { method: "DELETE" })).status, 204);
+  await api.close();
+
+  const restarted = await start();
+  assert.deepEqual(await restarted.list(), { tasks: [{ id: 1, title: "Updated" }] });
+  const missing = await fetch(restarted.url + "/2");
+  assert.equal(missing.status, 404);
+  await missing.json();
+  const next = await restarted.post("", { title: "Next" }, "third");
+  assert.deepEqual(await next.json(), { id: 3, title: "Next" });
 });
